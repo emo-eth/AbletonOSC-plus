@@ -11,6 +11,10 @@ OSC API:
     /live/lom/start_listen <dotted path>            -> sends /live/lom/get on change
     /live/lom/stop_listen  <dotted path>
 
+Special argument strings for /live/lom/set and /live/lom/call:
+    @lom:<dotted path>   resolves the path and passes the Live object itself
+    @json:<json>         decodes JSON and passes the resulting dict/list
+
 Path syntax:
     live_set.tempo
     live_set.tracks[0].name
@@ -23,6 +27,7 @@ Index into collections with [n] (zero-based) or ["key"] for named lookups.
 
 from __future__ import annotations
 
+import json
 import re
 import traceback
 from typing import Any, Tuple
@@ -38,6 +43,8 @@ from .handler import AbletonOSCHandler
 _SEGMENT_RE = re.compile(
     r'^(?P<name>[A-Za-z_][A-Za-z_0-9]*)(?:\[(?P<index>\d+)\]|\["(?P<key>[^"]+)"\])?$'
 )
+_ARG_LOM_REF_PREFIX = "@lom:"
+_ARG_JSON_PREFIX = "@json:"
 
 
 class LomPlusHandler(AbletonOSCHandler):
@@ -134,7 +141,7 @@ class LomPlusHandler(AbletonOSCHandler):
         if not params:
             return
         path = params[0]
-        value = params[1] if len(params) > 1 else None
+        value = self._decode_arg(params[1]) if len(params) > 1 else None
         try:
             parent, attr, _current = self._resolve_path(path)
             if attr is None:
@@ -147,7 +154,7 @@ class LomPlusHandler(AbletonOSCHandler):
         if not params:
             return ()
         path = params[0]
-        args = tuple(params[1:])
+        args = tuple(self._decode_arg(arg) for arg in params[1:])
         try:
             _parent, _attr, method = self._resolve_path(path)
             rv = method(*args) if callable(method) else None
@@ -210,13 +217,46 @@ class LomPlusHandler(AbletonOSCHandler):
         for path in list(self._listeners.keys()):
             self._handle_stop_listen((path,))
 
+    def _decode_arg(self, value):
+        if isinstance(value, str):
+            if value.startswith(_ARG_LOM_REF_PREFIX):
+                ref_path = value[len(_ARG_LOM_REF_PREFIX) :]
+                _parent, _attr, ref_value = self._resolve_path(ref_path)
+                return ref_value
+            if value.startswith(_ARG_JSON_PREFIX):
+                return json.loads(value[len(_ARG_JSON_PREFIX) :])
+        return value
+
 
 def _to_osc(value):
     if value is None or isinstance(value, (bool, int, float, str)):
         return value
+    if isinstance(value, dict):
+        return _ARG_JSON_PREFIX + json.dumps(_jsonable(value), separators=(",", ":"))
+    to_json = getattr(value, "to_json", None)
+    if callable(to_json):
+        return _ARG_JSON_PREFIX + json.dumps(
+            _jsonable(to_json()), separators=(",", ":")
+        )
     if isinstance(value, (list, tuple)):
         return tuple(_to_osc(v) for v in value)
     try:
         return tuple(_to_osc(v) for v in value)
+    except TypeError:
+        return repr(value)
+
+
+def _jsonable(value):
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, dict):
+        return {str(k): _jsonable(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(v) for v in value]
+    to_json = getattr(value, "to_json", None)
+    if callable(to_json):
+        return _jsonable(to_json())
+    try:
+        return [_jsonable(v) for v in value]
     except TypeError:
         return repr(value)
