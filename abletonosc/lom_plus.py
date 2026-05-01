@@ -158,7 +158,8 @@ class LomPlusHandler(AbletonOSCHandler):
         path = params[0]
         args = tuple(self._decode_arg(arg) for arg in params[1:])
         try:
-            _parent, _attr, method = self._resolve_path(path)
+            parent, attr, method = self._resolve_path(path)
+            args = self._prepare_call_args(parent, attr, args)
             rv = method(*args) if callable(method) else None
         except Exception as exc:
             self.logger.warning("lom/call %s%r failed: %s", path, args, exc)
@@ -228,6 +229,152 @@ class LomPlusHandler(AbletonOSCHandler):
             if value.startswith(_ARG_JSON_PREFIX):
                 return json.loads(value[len(_ARG_JSON_PREFIX) :])
         return value
+
+    # --- Live API argument compatibility -----------------------------------
+
+    def _prepare_call_args(self, parent, attr, args):
+        """Bridge Max-style JSON payloads to Live's Python API signatures."""
+        if Live is None or not attr or not args:
+            return args
+
+        if attr == "add_new_notes":
+            return (tuple(self._note_specifications(args[0])),) + args[1:]
+
+        if attr == "apply_note_modifications":
+            return (self._note_modifications(parent, args[0]),) + args[1:]
+
+        if attr == "replace_selected_notes":
+            return (
+                tuple(
+                    self._legacy_note_tuple(note)
+                    for note in self._notes_arg(args[0])
+                ),
+            )
+
+        if attr in (
+            "get_notes_by_id",
+            "remove_notes_by_id",
+            "select_notes_by_id",
+        ):
+            return (tuple(self._note_ids_arg(args[0])),) + args[1:]
+
+        if attr == "duplicate_notes_by_id":
+            payload = args[0]
+            if isinstance(payload, dict):
+                note_ids = tuple(payload.get("note_ids", ()))
+                destination = payload.get("destination_time", None)
+                transposition = payload.get("transposition_amount", 0)
+                return (note_ids, destination, transposition) + args[1:]
+            return (tuple(self._note_ids_arg(payload)),) + args[1:]
+
+        if attr == "get_notes_extended" and isinstance(args[0], dict):
+            payload = args[0]
+            return (
+                payload.get("from_pitch", 0),
+                payload.get("pitch_span", 128),
+                payload.get("from_time", -8192),
+                payload.get("time_span", 16384),
+            ) + args[1:]
+
+        if attr in (
+            "get_all_notes_extended",
+            "get_selected_notes_extended",
+        ) and isinstance(args[0], dict):
+            return args[1:]
+
+        return args
+
+    def _notes_arg(self, value):
+        if isinstance(value, dict):
+            return value.get("notes", ())
+        return value or ()
+
+    def _note_ids_arg(self, value):
+        if isinstance(value, dict):
+            return value.get("note_ids", ())
+        return value or ()
+
+    def _note_specifications(self, value):
+        for note in self._notes_arg(value):
+            yield self._note_specification(note)
+
+    def _note_specification(self, note):
+        if not isinstance(note, dict):
+            return note
+
+        kwargs = self._note_kwargs(note, include_note_id=False)
+        try:
+            return Live.Clip.MidiNoteSpecification(**kwargs)
+        except TypeError:
+            required = {
+                key: kwargs[key]
+                for key in ("start_time", "duration", "pitch", "velocity", "mute")
+                if key in kwargs
+            }
+            spec = Live.Clip.MidiNoteSpecification(**required)
+            for key, value in kwargs.items():
+                if key in required:
+                    continue
+                try:
+                    setattr(spec, key, value)
+                except Exception:
+                    pass
+            return spec
+
+    def _note_modifications(self, clip, value):
+        note_dicts = [
+            note for note in self._notes_arg(value) if isinstance(note, dict)
+        ]
+        if len(note_dicts) == 0:
+            return self._notes_arg(value)
+
+        note_ids = tuple(
+            note["note_id"] for note in note_dicts if "note_id" in note
+        )
+        existing = clip.get_notes_by_id(note_ids)
+        by_id = {note.note_id: note for note in existing}
+
+        for payload in note_dicts:
+            note = by_id.get(payload.get("note_id"))
+            if note is None:
+                continue
+            for key, value in self._note_kwargs(payload, include_note_id=False).items():
+                try:
+                    setattr(note, key, value)
+                except Exception:
+                    pass
+        return existing
+
+    def _note_kwargs(self, note, include_note_id):
+        fields = (
+            "note_id",
+            "pitch",
+            "start_time",
+            "duration",
+            "velocity",
+            "mute",
+            "probability",
+            "velocity_deviation",
+            "release_velocity",
+        )
+        result = {}
+        for field in fields:
+            if field == "note_id" and not include_note_id:
+                continue
+            if field in note:
+                result[field] = note[field]
+        return result
+
+    def _legacy_note_tuple(self, note):
+        if not isinstance(note, dict):
+            return tuple(note)
+        return (
+            note.get("pitch", 60),
+            note.get("start_time", 0),
+            note.get("duration", 1),
+            note.get("velocity", 100),
+            note.get("mute", False),
+        )
 
 
 def _to_osc(value):
