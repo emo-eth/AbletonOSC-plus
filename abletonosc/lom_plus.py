@@ -112,6 +112,8 @@ class LomPlusHandler(AbletonOSCHandler):
             is_last = i == len(parts) - 2
             if is_last and m.group("index") is None and m.group("key") is None:
                 terminal_attr = name
+                if name == "length" and not hasattr(obj, name):
+                    return obj, terminal_attr, len(obj)
                 return obj, terminal_attr, getattr(obj, name)
             obj = getattr(obj, name)
             if m.group("index") is not None:
