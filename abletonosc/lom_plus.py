@@ -270,9 +270,22 @@ class LomPlusHandler(AbletonOSCHandler):
         path = params[0]
         query = params[1]
         include_private = bool(params[2]) if len(params) > 2 else False
+        names_only = _as_bool(params[3]) if len(params) > 3 else False
+        max_members = _bounded_int(
+            params[4] if len(params) > 4 else 50,
+            50,
+            1,
+            50,
+        )
         try:
             _parent, _attr, value = self._resolve_path(path)
-            result = search_members(value, query, include_private=include_private)
+            result = search_members(
+                value,
+                query,
+                include_private=include_private,
+                max_members=max_members,
+                names_only=names_only,
+            )
             result["path"] = path
         except Exception as exc:
             self.logger.warning("probe/search %s %s failed: %s", path, query, exc)

@@ -45,19 +45,31 @@ def describe_object(
     }
 
 
-def search_members(obj: Any, query: str, include_private: bool = False, max_members: int = 500) -> Dict[str, Any]:
+def search_members(
+    obj: Any,
+    query: str,
+    include_private: bool = False,
+    max_members: int = 500,
+    names_only: bool = False,
+) -> Dict[str, Any]:
     lowered = query.lower()
-    described = describe_object(obj, include_private=include_private, max_members=max_members)
-    matches = [
-        member
-        for member in described["members"]
-        if lowered in member["name"].lower()
-    ]
+    names = member_names(obj, include_private=include_private)
+    matched_names = [name for name in names if lowered in name.lower()]
+    max_members = max(1, int(max_members))
+    page_names = matched_names[:max_members]
+    if names_only:
+        matches = [{"name": name} for name in page_names]
+    else:
+        matches = [describe_member(obj, name) for name in page_names]
     return {
-        "class": described["class"],
-        "repr": described["repr"],
+        "class": "%s.%s" % (obj.__class__.__module__, obj.__class__.__name__),
+        "repr": safe_repr(obj),
         "query": query,
         "include_private": bool(include_private),
+        "names_only": bool(names_only),
+        "total_matches": len(matched_names),
+        "returned_matches": len(matches),
+        "truncated": len(matches) < len(matched_names),
         "matches": matches,
     }
 

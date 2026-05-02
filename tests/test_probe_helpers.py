@@ -92,6 +92,20 @@ def test_search_members_filters_case_insensitively():
     assert [member["name"] for member in result["matches"]] == ["freeze"]
 
 
+def test_search_members_can_return_compact_names_only_matches():
+    result = search_members(
+        OrderedObject(),
+        "a",
+        max_members=2,
+        names_only=True,
+    )
+
+    assert result["matches"] == [{"name": "alpha"}, {"name": "beta"}]
+    assert result["total_matches"] == 3
+    assert result["returned_matches"] == 2
+    assert result["truncated"] is True
+
+
 def test_has_member_reports_callable_status():
     result = has_member(FakeLiveObject(), "freeze")
     assert result["exists"] is True
