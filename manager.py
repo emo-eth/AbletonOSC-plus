@@ -134,6 +134,7 @@ class Manager(ControlSurface):
             importlib.reload(abletonosc.handler)
             importlib.reload(abletonosc.mixer)
             importlib.reload(abletonosc.osc_server)
+            importlib.reload(abletonosc.probe)
             importlib.reload(abletonosc.rack)
             importlib.reload(abletonosc.scene)
             importlib.reload(abletonosc.song)

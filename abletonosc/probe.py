@@ -6,20 +6,41 @@ from typing import Any, Dict, List
 PRIMITIVE_TYPES = (type(None), bool, int, float, str)
 
 
-def describe_object(obj: Any, include_private: bool = False, max_members: int = 500) -> Dict[str, Any]:
+def describe_object(
+    obj: Any,
+    include_private: bool = False,
+    max_members: int = 500,
+    offset: int = 0,
+    names_only: bool = False,
+) -> Dict[str, Any]:
+    names = member_names(obj, include_private=include_private)
+    offset = max(0, int(offset))
+    max_members = max(1, int(max_members))
+    page_names = names[offset : offset + max_members]
+
     members: List[Dict[str, Any]] = []
-    for name in sorted(dir(obj)):
-        if not include_private and name.startswith("_"):
-            continue
-        members.append(describe_member(obj, name))
-        if len(members) >= max_members:
-            break
+    for name in page_names:
+        if names_only:
+            members.append({"name": name})
+        else:
+            members.append(describe_member(obj, name))
+
+    next_offset = offset + len(members)
+    if next_offset >= len(names):
+        next_offset = None
 
     return {
         "class": "%s.%s" % (obj.__class__.__module__, obj.__class__.__name__),
         "repr": safe_repr(obj),
         "include_private": bool(include_private),
-        "truncated": len(members) >= max_members,
+        "names_only": bool(names_only),
+        "offset": offset,
+        "max_members": max_members,
+        "total_members": len(names),
+        "returned_members": len(members),
+        "next_offset": next_offset,
+        "truncated": next_offset is not None,
+        "names": page_names,
         "members": members,
     }
 
@@ -82,6 +103,16 @@ def describe_member(obj: Any, name: str) -> Dict[str, Any]:
     elif isinstance(value, (tuple, list)):
         entry["length"] = len(value)
     return entry
+
+
+def member_names(obj: Any, include_private: bool = False) -> List[str]:
+    try:
+        names = sorted(dir(obj))
+    except Exception:
+        return []
+    if include_private:
+        return names
+    return [name for name in names if not name.startswith("_")]
 
 
 def hasattr_static(obj: Any, name: str) -> bool:

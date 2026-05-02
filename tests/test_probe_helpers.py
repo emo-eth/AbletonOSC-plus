@@ -18,6 +18,20 @@ class FakeLiveObject:
         pass
 
 
+class OrderedObject:
+    alpha = 1
+    beta = 2
+    gamma = 3
+    _hidden = 4
+
+    @property
+    def explosive(self):
+        raise AssertionError("names-only should not inspect values")
+
+    def __dir__(self):
+        return ["gamma", "_hidden", "explosive", "beta", "alpha"]
+
+
 def test_describe_object_lists_public_members_without_calling_methods():
     result = describe_object(FakeLiveObject(), include_private=False)
 
@@ -37,6 +51,40 @@ def test_describe_object_can_include_private_members():
     result = describe_object(FakeLiveObject(), include_private=True)
     names = {member["name"] for member in result["members"]}
     assert "_private_value" in names
+
+
+def test_describe_object_supports_member_pagination():
+    result = describe_object(
+        OrderedObject(),
+        include_private=False,
+        max_members=2,
+        offset=1,
+    )
+
+    assert result["names"] == ["beta", "explosive"]
+    assert [member["name"] for member in result["members"]] == ["beta", "explosive"]
+    assert result["offset"] == 1
+    assert result["max_members"] == 2
+    assert result["total_members"] == 4
+    assert result["returned_members"] == 2
+    assert result["next_offset"] == 3
+    assert result["truncated"] is True
+
+
+def test_describe_object_names_only_does_not_getattr_members():
+    result = describe_object(
+        OrderedObject(),
+        include_private=False,
+        names_only=True,
+    )
+
+    assert result["names"] == ["alpha", "beta", "explosive", "gamma"]
+    assert result["members"] == [
+        {"name": "alpha"},
+        {"name": "beta"},
+        {"name": "explosive"},
+        {"name": "gamma"},
+    ]
 
 
 def test_search_members_filters_case_insensitively():

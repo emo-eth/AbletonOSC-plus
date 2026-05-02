@@ -28,6 +28,7 @@ Index into collections with [n] (zero-based) or ["key"] for named lookups.
 from __future__ import annotations
 
 import json
+import importlib
 import re
 import traceback
 from typing import Any, Tuple
@@ -38,7 +39,16 @@ except ImportError:  # pragma: no cover - only imports when loaded inside Live
     Live = None
 
 from .handler import AbletonOSCHandler
-from .probe import describe_object, has_member, search_members
+from . import probe as _probe
+
+try:
+    importlib.reload(_probe)
+except Exception:
+    pass
+
+describe_object = _probe.describe_object
+has_member = _probe.has_member
+search_members = _probe.search_members
 
 
 _SEGMENT_RE = re.compile(
@@ -223,10 +233,31 @@ class LomPlusHandler(AbletonOSCHandler):
         if not params:
             return ()
         path = params[0]
-        include_private = bool(params[1]) if len(params) > 1 else False
+        include_private = _as_bool(params[1]) if len(params) > 1 else False
+        names_only = _as_bool(params[4]) if len(params) > 4 else False
+        default_max = 50 if names_only else 20
+        max_limit = 50 if names_only else 20
+        max_members = _bounded_int(
+            params[2] if len(params) > 2 else default_max,
+            default_max,
+            1,
+            max_limit,
+        )
+        offset = _bounded_int(
+            params[3] if len(params) > 3 else 0,
+            0,
+            0,
+            1000000,
+        )
         try:
             _parent, _attr, value = self._resolve_path(path)
-            result = describe_object(value, include_private=include_private)
+            result = describe_object(
+                value,
+                include_private=include_private,
+                max_members=max_members,
+                offset=offset,
+                names_only=names_only,
+            )
             result["path"] = path
         except Exception as exc:
             self.logger.warning("probe/describe %s failed: %s", path, exc)
@@ -456,3 +487,17 @@ def _jsonable(value):
         return [_jsonable(v) for v in value]
     except TypeError:
         return repr(value)
+
+
+def _as_bool(value):
+    if isinstance(value, str):
+        return value.lower() in ("1", "true", "yes", "on")
+    return bool(value)
+
+
+def _bounded_int(value, default, minimum, maximum):
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(minimum, min(maximum, parsed))
