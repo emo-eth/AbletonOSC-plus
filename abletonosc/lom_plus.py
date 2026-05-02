@@ -38,6 +38,7 @@ except ImportError:  # pragma: no cover - only imports when loaded inside Live
     Live = None
 
 from .handler import AbletonOSCHandler
+from .probe import describe_object, has_member, search_members
 
 
 _SEGMENT_RE = re.compile(
@@ -61,6 +62,9 @@ class LomPlusHandler(AbletonOSCHandler):
         self.osc_server.add_handler("/live/lom/call", self._handle_call)
         self.osc_server.add_handler("/live/lom/start_listen", self._handle_start_listen)
         self.osc_server.add_handler("/live/lom/stop_listen", self._handle_stop_listen)
+        self.osc_server.add_handler("/live/probe/describe", self._handle_probe_describe)
+        self.osc_server.add_handler("/live/probe/search", self._handle_probe_search)
+        self.osc_server.add_handler("/live/probe/has", self._handle_probe_has)
 
     # --- path resolution ---------------------------------------------------
 
@@ -214,6 +218,49 @@ class LomPlusHandler(AbletonOSCHandler):
             remove_fn(notify)
         except Exception:
             pass
+
+    def _handle_probe_describe(self, params):
+        if not params:
+            return ()
+        path = params[0]
+        include_private = bool(params[1]) if len(params) > 1 else False
+        try:
+            _parent, _attr, value = self._resolve_path(path)
+            result = describe_object(value, include_private=include_private)
+            result["path"] = path
+        except Exception as exc:
+            self.logger.warning("probe/describe %s failed: %s", path, exc)
+            result = {"path": path, "ok": False, "error": str(exc)}
+        return (path, _ARG_JSON_PREFIX + json.dumps(_jsonable(result), separators=(",", ":")))
+
+    def _handle_probe_search(self, params):
+        if len(params) < 2:
+            return ()
+        path = params[0]
+        query = params[1]
+        include_private = bool(params[2]) if len(params) > 2 else False
+        try:
+            _parent, _attr, value = self._resolve_path(path)
+            result = search_members(value, query, include_private=include_private)
+            result["path"] = path
+        except Exception as exc:
+            self.logger.warning("probe/search %s %s failed: %s", path, query, exc)
+            result = {"path": path, "query": query, "ok": False, "error": str(exc)}
+        return (path, query, _ARG_JSON_PREFIX + json.dumps(_jsonable(result), separators=(",", ":")))
+
+    def _handle_probe_has(self, params):
+        if len(params) < 2:
+            return ()
+        path = params[0]
+        name = params[1]
+        try:
+            _parent, _attr, value = self._resolve_path(path)
+            result = has_member(value, name)
+            result["path"] = path
+        except Exception as exc:
+            self.logger.warning("probe/has %s %s failed: %s", path, name, exc)
+            result = {"path": path, "name": name, "ok": False, "error": str(exc)}
+        return (path, name, _ARG_JSON_PREFIX + json.dumps(_jsonable(result), separators=(",", ":")))
 
     def clear_api(self):
         super().clear_api()
