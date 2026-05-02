@@ -29,6 +29,7 @@ class BrowserHandler(AbletonOSCHandler):
         self.class_identifier = "browser"
 
     def init_api(self):
+        self._search_cache = {}
         self.osc_server.add_handler("/live/browser/list/root", self._handle_list_root)
         self.osc_server.add_handler("/live/browser/list", self._handle_list_children)
         self.osc_server.add_handler("/live/browser/search", self._handle_search)
@@ -91,9 +92,15 @@ class BrowserHandler(AbletonOSCHandler):
         except Exception:
             return ()
 
-    def _walk(self):
+    def _root_entries_for(self, root_name=None):
+        entries = self._root_entries()
+        if root_name is None:
+            return entries
+        return [(name, item) for name, item in entries if name == root_name]
+
+    def _walk(self, root_name=None):
         visited = set()
-        stack = list(reversed(self._root_entries()))
+        stack = list(reversed(self._root_entries_for(root_name)))
         while stack:
             root_name, item = stack.pop()
             identity = id(item)
@@ -107,11 +114,14 @@ class BrowserHandler(AbletonOSCHandler):
 
     def _resolve_item(self, uri):
         uri = str(uri)
-        if uri.startswith("root:"):
-            root_name = uri.split(":", 1)[1]
-            for name, item in self._root_entries():
-                if name == root_name:
-                    return item
+        cached = self._search_cache.get(uri)
+        if cached is not None:
+            return cached
+
+        root_name = uri.split(":", 1)[1] if uri.startswith("root:") else None
+        for name, item in self._root_entries_for(root_name):
+            if name == root_name or self._item_uri(item, name) == uri:
+                return item
 
         for root_name, item in self._walk():
             if self._item_uri(item, root_name) == uri:
@@ -167,13 +177,17 @@ class BrowserHandler(AbletonOSCHandler):
             return ()
         query = str(params[0])
         limit = int(params[1]) if len(params) > 1 else 50
+        root_name = str(params[2]) if len(params) > 2 else None
         query_l = query.lower()
         matches = []
         try:
-            for root_name, item in self._walk():
+            for root_name, item in self._walk(root_name):
                 name = str(self._safe_get(item, "name", "")).lower()
                 uri = str(self._item_uri(item, root_name) or "").lower()
                 if query_l in name or query_l in uri:
+                    item_uri = self._item_uri(item, root_name)
+                    if item_uri:
+                        self._search_cache[item_uri] = item
                     matches.append(self._item_json(item, root_name))
                     if len(matches) >= limit:
                         break
