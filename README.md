@@ -28,8 +28,7 @@ Activity logs will be output to a `logs` subdirectory. Logging granularity can b
 
 # Usage
 
-AbletonOSC listens for OSC messages on port **11000**, and sends replies on port **11001**. Replies will be sent to the
-same IP as the originating message. When querying properties, OSC wildcard patterns can be used; for example, `/live/clip/get/* 0 0` will query all the properties of track 0, clip 0.
+AbletonOSC listens for OSC messages on port **11000**, and sends replies to the same IP and UDP source port as the originating message. When querying properties, OSC wildcard patterns can be used; for example, `/live/clip/get/* 0 0` will query all the properties of track 0, clip 0.
 
 ## Application API
 
@@ -557,4 +556,3 @@ For code contributions and feedback, many thanks to:
 - Mark Marijnissen ([markmarijnissen](https://github.com/markmarijnissen))
 - [capturcus](https://github.com/capturcus)
 - Esa Ruoho a.k.a. Lackluster ([esaruoho](https://github.com/esaruoho))
-

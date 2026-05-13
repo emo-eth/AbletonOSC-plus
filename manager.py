@@ -105,6 +105,7 @@ class Manager(ControlSurface):
                 abletonosc.SceneHandler(self),
                 abletonosc.MidiMapHandler(self),
                 abletonosc.LomPlusHandler(self),
+                abletonosc.WorkflowHandler(self),
             ]
 
     def clear_api(self):
@@ -125,6 +126,7 @@ class Manager(ControlSurface):
 
     def reload_imports(self):
         try:
+            importlib.invalidate_caches()
             importlib.reload(abletonosc.application)
             importlib.reload(abletonosc.automation)
             importlib.reload(abletonosc.browser)
@@ -140,8 +142,10 @@ class Manager(ControlSurface):
             importlib.reload(abletonosc.song)
             importlib.reload(abletonosc.track)
             importlib.reload(abletonosc.view)
+            importlib.reload(abletonosc.workflow)
             importlib.reload(abletonosc.lom_plus)
             importlib.reload(abletonosc)
+            self.osc_server.__class__ = abletonosc.OSCServer
         except Exception as e:
             exc = traceback.format_exc()
             logging.warning(exc)

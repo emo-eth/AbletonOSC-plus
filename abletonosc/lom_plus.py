@@ -30,6 +30,8 @@ from __future__ import annotations
 import json
 import importlib
 import re
+import struct
+import time
 import traceback
 from typing import Any, Tuple
 
@@ -40,6 +42,7 @@ except ImportError:  # pragma: no cover - only imports when loaded inside Live
 
 from .handler import AbletonOSCHandler
 from . import probe as _probe
+from .workflow import rebuild_arrangement_from_clips
 
 try:
     importlib.reload(_probe)
@@ -70,11 +73,29 @@ class LomPlusHandler(AbletonOSCHandler):
         self.osc_server.add_handler("/live/lom/get", self._handle_get)
         self.osc_server.add_handler("/live/lom/set", self._handle_set)
         self.osc_server.add_handler("/live/lom/call", self._handle_call)
+        self.osc_server.add_handler("/live/lom/batch", self._handle_batch)
+        self.osc_server.add_handler("/live/lom/batch_struct", self._handle_batch_struct)
         self.osc_server.add_handler("/live/lom/start_listen", self._handle_start_listen)
         self.osc_server.add_handler("/live/lom/stop_listen", self._handle_stop_listen)
         self.osc_server.add_handler("/live/probe/describe", self._handle_probe_describe)
         self.osc_server.add_handler("/live/probe/search", self._handle_probe_search)
         self.osc_server.add_handler("/live/probe/has", self._handle_probe_has)
+        self.osc_server.add_handler(
+            "/live/workflow/rebuild_arrangement_from_clips",
+            self._handle_workflow_rebuild_arrangement_from_clips,
+        )
+        self.osc_server.add_handler(
+            "/live/workflow/probe_codecs",
+            self._handle_workflow_probe_codecs,
+        )
+        self.osc_server.add_handler(
+            "/live/workflow/export_arrangement_inventory",
+            self._handle_workflow_export_arrangement_inventory,
+        )
+        self.osc_server.add_handler(
+            "/live/workflow/ensure_tracks",
+            self._handle_workflow_ensure_tracks,
+        )
 
     # --- path resolution ---------------------------------------------------
 
@@ -182,6 +203,147 @@ class LomPlusHandler(AbletonOSCHandler):
         if isinstance(rv, tuple):
             return (path,) + rv
         return (path, rv)
+
+    def _handle_batch(self, params):
+        started = time.time()
+        try:
+            payload = json.loads(params[0]) if params else {}
+            ops = payload if isinstance(payload, list) else payload.get("ops", [])
+            stop_on_error = bool(
+                False if isinstance(payload, list) else payload.get("stopOnError", False)
+            )
+            if not isinstance(ops, list):
+                raise ValueError("batch payload must contain an ops array")
+
+            results = []
+            for index, op in enumerate(ops):
+                try:
+                    results.append(self._run_batch_op(index, op))
+                except Exception as exc:
+                    result = {
+                        "index": index,
+                        "ok": False,
+                        "op": op.get("op") if isinstance(op, dict) else None,
+                        "path": op.get("path") if isinstance(op, dict) else None,
+                        "error": str(exc),
+                    }
+                    results.append(result)
+                    if stop_on_error:
+                        break
+
+            ok = all(result.get("ok") for result in results)
+            return (
+                json.dumps(
+                    {
+                        "ok": ok,
+                        "elapsedMs": int(round((time.time() - started) * 1000)),
+                        "results": results,
+                    },
+                    separators=(",", ":"),
+                ),
+            )
+        except Exception as exc:
+            self.logger.warning("lom/batch failed: %s", traceback.format_exc())
+            return (
+                json.dumps(
+                    {"ok": False, "error": str(exc), "results": []},
+                    separators=(",", ":"),
+                ),
+            )
+
+    def _handle_batch_struct(self, params):
+        started = time.time()
+        try:
+            if not params or not isinstance(params[0], (bytes, bytearray)):
+                raise ValueError("batch_struct expects one OSC blob argument")
+            decoded = _decode_struct_batch_request(bytes(params[0]))
+            stop_on_error = bool(decoded.get("stopOnError", False))
+            ops = decoded.get("ops", [])
+
+            results = []
+            for index, op in enumerate(ops):
+                try:
+                    results.append(self._run_batch_op(index, op))
+                except Exception as exc:
+                    result = {
+                        "index": index,
+                        "ok": False,
+                        "op": op.get("op") if isinstance(op, dict) else None,
+                        "path": op.get("path") if isinstance(op, dict) else None,
+                        "error": str(exc),
+                    }
+                    results.append(result)
+                    if stop_on_error:
+                        break
+
+            return (
+                _encode_struct_batch_response(
+                    {
+                        "elapsedMs": int(round((time.time() - started) * 1000)),
+                        "results": results,
+                    }
+                ),
+            )
+        except Exception as exc:
+            self.logger.warning("lom/batch_struct failed: %s", traceback.format_exc())
+            return (
+                _encode_struct_batch_response(
+                    {
+                        "elapsedMs": int(round((time.time() - started) * 1000)),
+                        "results": [
+                            {
+                                "index": 0,
+                                "ok": False,
+                                "error": str(exc),
+                            }
+                        ],
+                    }
+                ),
+            )
+
+    def _run_batch_op(self, index, op):
+        if not isinstance(op, dict):
+            raise ValueError("batch op %d must be an object" % index)
+
+        kind = op.get("op")
+        path = op.get("path")
+        if kind not in ("get", "set", "call"):
+            raise ValueError("batch op %d has unsupported op: %r" % (index, kind))
+        if not isinstance(path, str) or not path:
+            raise ValueError("batch op %d missing path" % index)
+
+        if kind == "get":
+            _parent, _attr, value = self._resolve_path(path)
+            return {
+                "index": index,
+                "ok": True,
+                "op": kind,
+                "path": path,
+                "value": _jsonable(value),
+            }
+
+        if kind == "set":
+            value = self._decode_arg(op.get("value", None))
+            parent, attr, _current = self._resolve_path(path)
+            if attr is None:
+                raise ValueError("cannot set: path does not end at a scalar attribute")
+            setattr(parent, attr, value)
+            return {"index": index, "ok": True, "op": kind, "path": path}
+
+        args = op.get("args", [])
+        if not isinstance(args, list):
+            raise ValueError("batch call op %d args must be an array" % index)
+        decoded_args = tuple(self._decode_arg(arg) for arg in args)
+        parent, attr, method = self._resolve_path(path)
+        decoded_args = self._prepare_call_args(parent, attr, decoded_args)
+        value = method(*decoded_args) if callable(method) else None
+        return {
+            "index": index,
+            "ok": True,
+            "op": kind,
+            "path": path,
+            "value": _jsonable(value),
+        }
 
     def _handle_start_listen(self, params):
         if not params:
@@ -305,6 +467,140 @@ class LomPlusHandler(AbletonOSCHandler):
             self.logger.warning("probe/has %s %s failed: %s", path, name, exc)
             result = {"path": path, "name": name, "ok": False, "error": str(exc)}
         return (path, name, _ARG_JSON_PREFIX + json.dumps(_jsonable(result), separators=(",", ":")))
+
+    def _handle_workflow_rebuild_arrangement_from_clips(self, params):
+        return rebuild_arrangement_from_clips(self, params)
+
+    def _handle_workflow_ensure_tracks(self, params):
+        from . import workflow
+
+        return workflow.ensure_tracks(self, params)
+
+    def _handle_workflow_probe_codecs(self, params):
+        modules = (
+            "google.protobuf",
+            "msgpack",
+            "cbor2",
+            "pickle",
+            "marshal",
+            "struct",
+            "array",
+            "base64",
+            "zlib",
+            "json",
+        )
+        results = {}
+        for module in modules:
+            try:
+                imported = importlib.import_module(module)
+                version = getattr(imported, "__version__", None)
+                results[module] = {"available": True, "version": version}
+            except Exception as exc:
+                results[module] = {
+                    "available": False,
+                    "error": exc.__class__.__name__,
+                }
+
+        return (
+            json.dumps(
+                {"ok": True, "modules": results},
+                separators=(",", ":"),
+            ),
+        )
+
+    def _handle_workflow_export_arrangement_inventory(self, params):
+        started = time.time()
+        try:
+            payload = json.loads(params[0]) if params else {}
+            include_clip_names = bool(payload.get("includeClipNames", True))
+            include_clip_timing = bool(payload.get("includeClipTiming", False))
+            include_clip_color = bool(payload.get("includeClipColor", False))
+            compact = bool(payload.get("compact", False))
+
+            if "tracks" in payload:
+                track_indices = [int(track) for track in payload["tracks"]]
+            else:
+                start = int(payload.get("start", 0))
+                end = int(payload.get("end", len(self.song.tracks)))
+                if start < 0 or end < start:
+                    raise ValueError(
+                        "invalid track range: start=%d end=%d" % (start, end)
+                    )
+                track_indices = list(range(start, min(end, len(self.song.tracks))))
+
+            tracks = []
+            for track_index in track_indices:
+                if track_index < 0 or track_index >= len(self.song.tracks):
+                    raise ValueError("track index out of range: %d" % track_index)
+                track = self.song.tracks[track_index]
+                if compact:
+                    clips = []
+                    try:
+                        for clip_index, clip in enumerate(track.arrangement_clips):
+                            if include_clip_timing or include_clip_color:
+                                clip_row = [clip_index]
+                                if include_clip_names:
+                                    clip_row.append(clip.name)
+                                if include_clip_timing:
+                                    clip_row.append(clip.start_time)
+                                    clip_row.append(clip.length)
+                                if include_clip_color:
+                                    clip_row.append(clip.color)
+                                clips.append(clip_row)
+                            elif include_clip_names:
+                                clips.append(clip.name)
+                            else:
+                                clips.append(clip_index)
+                        tracks.append([track_index, track.name, 1, clips])
+                    except Exception as exc:
+                        tracks.append([track_index, track.name, 0, str(exc)])
+                    continue
+                row = {
+                    "track": track_index,
+                    "name": track.name,
+                    "readable": True,
+                    "clips": [],
+                }
+                try:
+                    for clip_index, clip in enumerate(track.arrangement_clips):
+                        clip_row = {"index": clip_index}
+                        if include_clip_names:
+                            clip_row["name"] = clip.name
+                        if include_clip_timing:
+                            clip_row["start"] = clip.start_time
+                            clip_row["length"] = clip.length
+                        if include_clip_color:
+                            clip_row["color"] = clip.color
+                        row["clips"].append(clip_row)
+                except Exception as exc:
+                    row["readable"] = False
+                    row["error"] = str(exc)
+                    row["clips"] = []
+                tracks.append(row)
+
+            elapsed_ms = int(round((time.time() - started) * 1000))
+            return (
+                json.dumps(
+                    {
+                        "ok": True,
+                        "elapsedMs": elapsed_ms,
+                        "compact": compact,
+                        "tracks": tracks,
+                    },
+                    separators=(",", ":"),
+                ),
+            )
+        except Exception as exc:
+            self.logger.warning(
+                "workflow export_arrangement_inventory failed: %s",
+                traceback.format_exc(),
+            )
+            return (
+                json.dumps(
+                    {"ok": False, "error": str(exc)},
+                    separators=(",", ":"),
+                ),
+            )
 
     def clear_api(self):
         super().clear_api()
@@ -500,6 +796,240 @@ def _jsonable(value):
         return [_jsonable(v) for v in value]
     except TypeError:
         return repr(value)
+
+
+_STRUCT_REQUEST_MAGIC = b"LMB1"
+_STRUCT_RESPONSE_MAGIC = b"LMR1"
+_STRUCT_OP_GET = 1
+_STRUCT_OP_SET = 2
+_STRUCT_OP_CALL = 3
+_STRUCT_TAG_NULL = 0
+_STRUCT_TAG_FALSE = 1
+_STRUCT_TAG_TRUE = 2
+_STRUCT_TAG_INT32 = 3
+_STRUCT_TAG_FLOAT64 = 4
+_STRUCT_TAG_STRING_REF = 5
+_STRUCT_TAG_ARRAY = 6
+_STRUCT_TAG_OBJECT = 7
+
+
+def _decode_struct_batch_request(blob):
+    reader = _StructReader(blob)
+    reader.expect(_STRUCT_REQUEST_MAGIC)
+    stop_on_error = reader.u8() != 0
+    strings = _read_struct_string_table(reader)
+    op_count = reader.u16()
+    ops = []
+    for _index in range(op_count):
+        code = reader.u8()
+        path = strings[reader.u16()]
+        if code == _STRUCT_OP_GET:
+            ops.append({"op": "get", "path": path})
+        elif code == _STRUCT_OP_SET:
+            ops.append(
+                {
+                    "op": "set",
+                    "path": path,
+                    "value": _read_struct_value(reader, strings),
+                }
+            )
+        elif code == _STRUCT_OP_CALL:
+            arg_count = reader.u16()
+            args = [_read_struct_value(reader, strings) for _ in range(arg_count)]
+            ops.append({"op": "call", "path": path, "args": args})
+        else:
+            raise ValueError("unsupported struct batch op code: %r" % code)
+    return {"stopOnError": stop_on_error, "ops": ops}
+
+
+def _encode_struct_batch_response(response):
+    strings = _StructStringTable()
+    for result in response.get("results", []):
+        if result.get("ok"):
+            _collect_struct_strings(_jsonable(result.get("value", None)), strings)
+        else:
+            _collect_struct_strings(str(result.get("error", "")), strings)
+
+    writer = _StructWriter()
+    writer.raw(_STRUCT_RESPONSE_MAGIC)
+    writer.u32(max(0, int(response.get("elapsedMs", 0))))
+    _write_struct_string_table(writer, strings.values)
+    results = response.get("results", [])
+    writer.u16(len(results))
+    for result in results:
+        writer.u16(int(result.get("index", 0)))
+        ok = bool(result.get("ok"))
+        writer.u8(1 if ok else 0)
+        if ok:
+            _write_struct_value(writer, _jsonable(result.get("value", None)), strings)
+        else:
+            _write_struct_value(writer, str(result.get("error", "")), strings)
+    return writer.bytes()
+
+
+def _collect_struct_strings(value, table):
+    if isinstance(value, str):
+        table.intern(value)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            _collect_struct_strings(item, table)
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            table.intern(str(key))
+            _collect_struct_strings(item, table)
+
+
+def _write_struct_string_table(writer, strings):
+    writer.u16(len(strings))
+    for value in strings:
+        writer.string(value)
+
+
+def _read_struct_string_table(reader):
+    return [reader.string() for _ in range(reader.u16())]
+
+
+def _write_struct_value(writer, value, strings):
+    if value is None:
+        writer.u8(_STRUCT_TAG_NULL)
+    elif value is False:
+        writer.u8(_STRUCT_TAG_FALSE)
+    elif value is True:
+        writer.u8(_STRUCT_TAG_TRUE)
+    elif isinstance(value, int) and -2147483648 <= value <= 2147483647:
+        writer.u8(_STRUCT_TAG_INT32)
+        writer.i32(value)
+    elif isinstance(value, (int, float)):
+        writer.u8(_STRUCT_TAG_FLOAT64)
+        writer.f64(float(value))
+    elif isinstance(value, str):
+        writer.u8(_STRUCT_TAG_STRING_REF)
+        writer.u16(strings.index(value))
+    elif isinstance(value, (list, tuple)):
+        writer.u8(_STRUCT_TAG_ARRAY)
+        writer.u16(len(value))
+        for item in value:
+            _write_struct_value(writer, item, strings)
+    elif isinstance(value, dict):
+        items = list(value.items())
+        writer.u8(_STRUCT_TAG_OBJECT)
+        writer.u16(len(items))
+        for key, item in items:
+            writer.u16(strings.index(str(key)))
+            _write_struct_value(writer, item, strings)
+    else:
+        _write_struct_value(writer, repr(value), strings)
+
+
+def _read_struct_value(reader, strings):
+    tag = reader.u8()
+    if tag == _STRUCT_TAG_NULL:
+        return None
+    if tag == _STRUCT_TAG_FALSE:
+        return False
+    if tag == _STRUCT_TAG_TRUE:
+        return True
+    if tag == _STRUCT_TAG_INT32:
+        return reader.i32()
+    if tag == _STRUCT_TAG_FLOAT64:
+        return reader.f64()
+    if tag == _STRUCT_TAG_STRING_REF:
+        return strings[reader.u16()]
+    if tag == _STRUCT_TAG_ARRAY:
+        return [_read_struct_value(reader, strings) for _ in range(reader.u16())]
+    if tag == _STRUCT_TAG_OBJECT:
+        result = {}
+        for _ in range(reader.u16()):
+            result[strings[reader.u16()]] = _read_struct_value(reader, strings)
+        return result
+    raise ValueError("unsupported struct batch value tag: %r" % tag)
+
+
+class _StructStringTable:
+    def __init__(self):
+        self.values = []
+        self._index = {}
+
+    def intern(self, value):
+        value = str(value)
+        if value in self._index:
+            return self._index[value]
+        index = len(self.values)
+        self.values.append(value)
+        self._index[value] = index
+        return index
+
+    def index(self, value):
+        return self._index[str(value)]
+
+
+class _StructWriter:
+    def __init__(self):
+        self._chunks = []
+
+    def raw(self, value):
+        self._chunks.append(bytes(value))
+
+    def u8(self, value):
+        self._chunks.append(struct.pack(">B", int(value)))
+
+    def u16(self, value):
+        self._chunks.append(struct.pack(">H", int(value)))
+
+    def u32(self, value):
+        self._chunks.append(struct.pack(">I", int(value)))
+
+    def i32(self, value):
+        self._chunks.append(struct.pack(">i", int(value)))
+
+    def f64(self, value):
+        self._chunks.append(struct.pack(">d", float(value)))
+
+    def string(self, value):
+        encoded = str(value).encode("utf-8")
+        self.u32(len(encoded))
+        self._chunks.append(encoded)
+
+    def bytes(self):
+        return b"".join(self._chunks)
+
+
+class _StructReader:
+    def __init__(self, data):
+        self._data = data
+        self._offset = 0
+
+    def expect(self, expected):
+        actual = self._read(len(expected))
+        if actual != expected:
+            raise ValueError("invalid struct batch magic: %r" % actual)
+
+    def u8(self):
+        return struct.unpack(">B", self._read(1))[0]
+
+    def u16(self):
+        return struct.unpack(">H", self._read(2))[0]
+
+    def u32(self):
+        return struct.unpack(">I", self._read(4))[0]
+
+    def i32(self):
+        return struct.unpack(">i", self._read(4))[0]
+
+    def f64(self):
+        return struct.unpack(">d", self._read(8))[0]
+
+    def string(self):
+        size = self.u32()
+        return self._read(size).decode("utf-8")
+
+    def _read(self, size):
+        end = self._offset + size
+        if end > len(self._data):
+            raise ValueError("truncated struct batch payload")
+        chunk = self._data[self._offset : end]
+        self._offset = end
+        return chunk
 
 
 def _as_bool(value):
