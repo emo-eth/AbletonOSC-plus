@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import importlib
 import re
+import struct
 import time
 import traceback
 
@@ -19,6 +20,18 @@ from .handler import AbletonOSCHandler
 _ARRANGEMENT_CLIP_RE = re.compile(
     r"^live_set\.tracks\[(?P<track>\d+)\]\.arrangement_clips\[(?P<clip>\d+)\]$"
 )
+_WORKFLOW_PAYLOAD_MAGIC = b"WFP1"
+
+
+class _ValueTag:
+    NULL = 0
+    FALSE = 1
+    TRUE = 2
+    INT32 = 3
+    FLOAT64 = 4
+    STRING_REF = 5
+    ARRAY = 6
+    OBJECT = 7
 
 
 class WorkflowHandler(AbletonOSCHandler):
@@ -145,6 +158,81 @@ def _error(message):
     return json.dumps({"ok": False, "error": message}, separators=(",", ":"))
 
 
+def _decode_workflow_payload_arg(value):
+    if isinstance(value, (bytes, bytearray)):
+        return _decode_struct_workflow_payload(bytes(value))
+    if isinstance(value, str):
+        return json.loads(value)
+    raise ValueError("workflow payload must be a JSON string or OSC blob")
+
+
+def _decode_struct_workflow_payload(blob):
+    reader = _StructReader(blob, _WORKFLOW_PAYLOAD_MAGIC)
+    strings = _read_struct_string_table(reader)
+    return _read_struct_value(reader, strings)
+
+
+def _read_struct_string_table(reader):
+    return [reader.string() for _ in range(reader.u16())]
+
+
+def _read_struct_value(reader, strings):
+    tag = reader.u8()
+    if tag == _ValueTag.NULL:
+        return None
+    if tag == _ValueTag.FALSE:
+        return False
+    if tag == _ValueTag.TRUE:
+        return True
+    if tag == _ValueTag.INT32:
+        return reader.i32()
+    if tag == _ValueTag.FLOAT64:
+        return reader.f64()
+    if tag == _ValueTag.STRING_REF:
+        return strings[reader.u16()]
+    if tag == _ValueTag.ARRAY:
+        return [_read_struct_value(reader, strings) for _ in range(reader.u16())]
+    if tag == _ValueTag.OBJECT:
+        result = {}
+        for _ in range(reader.u16()):
+            result[strings[reader.u16()]] = _read_struct_value(reader, strings)
+        return result
+    raise ValueError("unsupported workflow payload value tag: %r" % tag)
+
+
+class _StructReader:
+    def __init__(self, data, magic):
+        self.data = data
+        self.offset = 0
+        actual = self._read(len(magic))
+        if actual != magic:
+            raise ValueError("invalid workflow payload magic: %r" % actual)
+
+    def u8(self):
+        return struct.unpack(">B", self._read(1))[0]
+
+    def u16(self):
+        return struct.unpack(">H", self._read(2))[0]
+
+    def i32(self):
+        return struct.unpack(">i", self._read(4))[0]
+
+    def f64(self):
+        return struct.unpack(">d", self._read(8))[0]
+
+    def string(self):
+        size = self.u16()
+        return self._read(size).decode("utf-8")
+
+    def _read(self, size):
+        end = self.offset + size
+        if end > len(self.data):
+            raise ValueError("truncated workflow payload")
+        chunk = self.data[self.offset : end]
+        self.offset = end
+        return chunk
+
+
 def _same_name(left, right):
     return str(left).lower() == str(right).lower()
 
@@ -245,10 +333,10 @@ def probe_codecs():
 def rebuild_arrangement_from_clips(handler, params):
     started = time.time()
     if not params:
-        return (_error("missing JSON payload"),)
+        return (_error("missing workflow payload"),)
 
     try:
-        payload = json.loads(params[0])
+        payload = _decode_workflow_payload_arg(params[0])
         clear_specs = payload.get("clear", [])
         copy_specs = payload.get("copies", [])
 
@@ -292,10 +380,10 @@ def rebuild_arrangement_from_clips(handler, params):
 def ensure_tracks(handler, params):
     started = time.time()
     if not params:
-        return (_error("missing JSON payload"),)
+        return (_error("missing workflow payload"),)
 
     try:
-        payload = json.loads(params[0])
+        payload = _decode_workflow_payload_arg(params[0])
         header_name = _required_string(payload, "headerName")
         track_names = [
             str(name) for name in payload.get("trackNames", []) if str(name)
@@ -418,7 +506,7 @@ def ensure_tracks(handler, params):
 def export_arrangement_inventory(handler, params):
     started = time.time()
     try:
-        payload = json.loads(params[0]) if params else {}
+        payload = _decode_workflow_payload_arg(params[0]) if params else {}
         include_clip_names = bool(payload.get("includeClipNames", True))
         include_clip_timing = bool(payload.get("includeClipTiming", False))
         include_clip_color = bool(payload.get("includeClipColor", False))
